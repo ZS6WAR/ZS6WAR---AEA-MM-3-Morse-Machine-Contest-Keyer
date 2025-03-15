@@ -131,7 +131,6 @@ def show_port_selection():
     root.title("ZS6WAR AEA MM-3 Morse Machine Contest Keyer - v.0.1 Setup")
     root.geometry("300x150")
     
-    # Set window icon
     try:
         root.iconbitmap("morse_key.ico")
     except tk.TclError as e:
@@ -569,7 +568,7 @@ def show_function_key_window():
             exchange=exchange,
             mycall=mycall,
             serial=serial
-        )
+        ).upper()  # Convert to uppercase before sending
         try:
             ser.write(formatted_message.encode('ascii') + b'\n')
             time.sleep(0.1)
@@ -595,7 +594,7 @@ def show_function_key_window():
         char = event.char
         if char and ser and ser.is_open and not tune_state.get():
             try:
-                ser.write(char.encode('ascii'))
+                ser.write(char.upper().encode('ascii'))  # Convert to uppercase before sending
             except Exception:
                 pass
 
@@ -603,7 +602,7 @@ def show_function_key_window():
         global ser
         try:
             ser.write("\x03".encode('ascii') + b'\n')
-            ser.write(command.encode('ascii') + b'\n')
+            ser.write(command.upper().encode('ascii') + b'\n')  # Convert to uppercase before sending
             if include_terminator:
                 terminator = "*9" if tune_command else "*C709"
                 ser.write(terminator.encode('ascii') + b'\n')
@@ -929,6 +928,11 @@ def show_function_key_window():
         btn.grid(row=row, column=col, padx=10, pady=10)
         buttons[f_key] = btn
         ui_elements.append(btn)
+        
+        # Add right-click context menu to each F-key button
+        context_menu = tk.Menu(btn, tearoff=0)
+        context_menu.add_command(label=f"Edit {f_key}", command=lambda k=f_key: edit_macro_and_label(k))
+        btn.bind("<Button-3>", lambda event, menu=context_menu: menu.post(event.x_root, event.y_root))
 
     qrz_button = tk.Button(key_window, text="QRZ", command=lookup_qrz, width=8, height=2)
     qrz_button.grid(row=2, column=6, padx=10, pady=10, rowspan=2)
