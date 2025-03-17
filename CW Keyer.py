@@ -82,7 +82,8 @@ contest_config = {
     "power": "High",
     "transmitter": "One",
     "exchange": "",
-    "use_serial_exchange": False
+    "use_serial_exchange": False,
+    "send_tu_on_log": False
 }
 
 def load_settings():
@@ -126,9 +127,68 @@ def save_settings():
     except Exception as e:
         pass  # Silently ignore errors
 
+def format_output(callsign, rst, received_exchange, mycall):
+    formatted_rst = "5NN" if use_5nn.get() and rst == "599" else rst
+    formatted_received_exchange = received_exchange
+    if shorten_zeros.get() and received_exchange.isdigit():
+        formatted_received_exchange = received_exchange.replace("0", "T")
+    formatted_exchange = str(serial_number) if contest_config["use_serial_exchange"] else contest_config["exchange"]
+    formatted_serial = str(serial_number)
+    # Adjust serial number format for "Shorten 0 to T" when less than 100 QSOs
+    if shorten_zeros.get() and contest_config["use_serial_exchange"]:
+        if len(qso_list) < 100:
+            formatted_serial = f"{serial_number:03d}".replace("0", "T")
+        else:
+            formatted_serial = str(serial_number).replace("0", "T")
+    return callsign, formatted_rst, formatted_received_exchange, mycall, formatted_exchange, formatted_serial
+
+def send_to_serial(message):
+    global ser, serial_number, speed_var
+    if ser is None or not ser.is_open:
+        messagebox.showerror("Error", "Serial port not connected. Please restart and select a port.")
+        if 'key_window' in globals():
+            key_window.destroy()
+            show_port_selection()
+        return 0
+    
+    callsign = callsign_var.get().strip() if callsign_var else ""
+    rst = snt_var.get().strip() if snt_var else "599"
+    received_exchange = exchange_var.get().strip() if exchange_var else ""
+    mycall = my_station["callsign"]
+    
+    callsign, rst, received_exchange, mycall, exchange, serial = format_output(callsign, rst, received_exchange, mycall)
+    formatted_message = message.format(
+        callsign=callsign,
+        rst=rst,
+        exchange=exchange,
+        mycall=mycall,
+        serial=serial
+    ).upper()
+    try:
+        ser.write(formatted_message.encode('ascii') + b'\n')
+        time.sleep(0.1)
+        ser.reset_input_buffer()
+        wpm = int(speed_var.get()) if speed_var else 25
+        duration = calculate_cw_duration(formatted_message, wpm)
+        return duration
+    except serial.SerialException as e:
+        messagebox.showerror("Error", f"Failed to send: {e}")
+        ser.close()
+        ser = None
+        if 'key_window' in globals():
+            key_window.destroy()
+            show_port_selection()
+        return 0
+    except ValueError as e:
+        messagebox.showerror("Error", f"Invalid WPM value: {speed_var.get() if speed_var else 'N/A'}: {e}")
+        return 0
+    except Exception as e:
+        messagebox.showerror("Error", f"Unexpected error: {e}")
+        return 0
+
 def show_port_selection():
     root = tk.Tk()
-    root.title("ZS6WAR AEA MM-3 Morse Machine Contest Keyer - v.0.1 Setup")
+    root.title("ZS6WAR AEA MM-3 Morse Machine Contest Keyer - v.0.4 Setup")
     root.geometry("300x150")
     
     try:
@@ -261,6 +321,10 @@ def log_qso(event=None):
     
     if log_tree:
         log_tree.insert("", "end", values=(len(qso_list), qso["datetime"], qso["callsign"], qso["rst_sent"], qso["rst_received"], qso["exchange_sent"], qso["exchange_received"], qso["frequency"], qso["mode"]))
+        log_tree.yview_moveto(1)
+    
+    if contest_config["send_tu_on_log"]:
+        send_to_serial("TU")
     
     serial_number += 1
     callsign_var.set("")
@@ -274,7 +338,10 @@ def show_qso_window():
     settings = load_settings()
     qso_window.geometry(settings.get("log_window_geometry", "800x400+0+0"))
     
-    tree = ttk.Treeview(qso_window, columns=("Nr", "DateTime", "Callsign", "RST Sent", "RST Rcvd", "Exch Sent", "Exch Rcvd", "Freq", "Mode"), show="headings")
+    tree_frame = tk.Frame(qso_window)
+    tree_frame.pack(fill="both", expand=True)
+    
+    tree = ttk.Treeview(tree_frame, columns=("Nr", "DateTime", "Callsign", "RST Sent", "RST Rcvd", "Exch Sent", "Exch Rcvd", "Freq", "Mode"), show="headings")
     tree.heading("Nr", text="Nr")
     tree.heading("DateTime", text="Date/Time (UTC)")
     tree.heading("Callsign", text="Callsign")
@@ -287,6 +354,12 @@ def show_qso_window():
     
     for col in tree["columns"]:
         tree.column(col, width=90, anchor="center")
+    
+    scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=scrollbar.set)
+    
+    tree.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
     
     for i, qso in enumerate(qso_list, 1):
         tree.insert("", "end", values=(i, qso["datetime"], qso["callsign"], qso["rst_sent"], qso["rst_received"], qso["exchange_sent"], qso["exchange_received"], qso["frequency"], qso["mode"]))
@@ -302,7 +375,6 @@ def show_qso_window():
 
     tree.bind("<Button-3>", show_context_menu)
 
-    tree.pack(fill="both", expand=True)
     log_tree = tree
     return qso_window
 
@@ -326,10 +398,17 @@ def edit_qso(tree):
         messagebox.showwarning("Warning", "No QSO selected!")
         return
     
-    qso_values = tree.item(selected_item, "values")
-    qso_number = int(qso_values[0])
-    qso_index = qso_number - 1
-    qso = qso_list[qso_index]
+    try:
+        qso_values = tree.item(selected_item, "values")
+        qso_number = int(qso_values[0])
+        qso_index = qso_number - 1
+        qso = qso_list[qso_index]
+    except IndexError as e:
+        messagebox.showerror("Error", f"QSO index out of range: {e}")
+        return
+    except ValueError as e:
+        messagebox.showerror("Error", f"Invalid QSO number: {e}")
+        return
 
     dialog = tk.Toplevel(key_window)
     dialog.title(f"Edit QSO #{qso_number}")
@@ -357,14 +436,26 @@ def edit_qso(tree):
         entries[key] = entry
 
     def save_changes():
-        for key, entry in entries.items():
-            qso[key] = entry.get()
-        qso_list[qso_index] = qso
-        tree.delete(*tree.get_children())
-        for i, qso in enumerate(qso_list, 1):
-            tree.insert("", "end", values=(i, qso["datetime"], qso["callsign"], qso["rst_sent"], qso["rst_received"], qso["exchange_sent"], qso["exchange_received"], qso["frequency"], qso["mode"]))
-        messagebox.showinfo("Updated", f"QSO #{qso_number} updated.")
-        dialog.destroy()
+        nonlocal qso
+        try:
+            for key, entry in entries.items():
+                qso[key] = entry.get()
+            datetime_str = qso["datetime"]
+            datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
+            qso_list[qso_index] = qso
+            tree.delete(*tree.get_children())
+            for i, qso_item in enumerate(qso_list, 1):
+                tree.insert("", "end", values=(i, qso_item["datetime"], qso_item["callsign"], 
+                                              qso_item["rst_sent"], qso_item["rst_received"], 
+                                              qso_item["exchange_sent"], qso_item["exchange_received"], 
+                                              qso_item["frequency"], qso_item["mode"]))
+            tree.yview_moveto(1)
+            messagebox.showinfo("Updated", f"QSO #{qso_number} updated.")
+            dialog.destroy()
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid datetime format. Use 'YYYY-MM-DD HH:MM:SS': {e}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save QSO changes: {e}")
 
     tk.Button(dialog, text="Save", command=save_changes).grid(row=len(fields), column=0, columnspan=2, pady=10)
     tk.Button(dialog, text="Cancel", command=dialog.destroy).grid(row=len(fields)+1, column=0, columnspan=2, pady=5)
@@ -379,7 +470,7 @@ def export_to_adif():
         return
     
     with open(filename, "w") as f:
-        f.write("Generated by ZS6WAR AEA MM-3 Morse Machine Contest Keyer - v.0.1\n<EOH>\n")
+        f.write("Generated by ZS6WAR AEA MM-3 Morse Machine Contest Keyer - v.0.4\n<EOH>\n")
         for qso in qso_list:
             f.write(f"<QSO_DATE:8>{qso['datetime'][:10].replace('-', '')}\n")
             f.write(f"<TIME_ON:6>{qso['datetime'][11:].replace(':', '')}\n")
@@ -410,12 +501,13 @@ def export_to_cabrillo():
         f.write(f"CATEGORY-BAND: {contest_config['band'].upper().replace(' ', '-')}\n")
         f.write(f"CATEGORY-POWER: {contest_config['power'].upper()}\n")
         f.write(f"CATEGORY-TRANSMITTER: {contest_config['transmitter'].upper()}\n")
-        f.write("CREATED-BY: ZS6WAR AEA MM-3 Morse Machine Contest Keyer - v.0.1\n")
+        f.write("CREATED-BY: ZS6WAR AEA MM-3 Morse Machine Contest Keyer - v.0.4\n")
         for qso in qso_list:
             freq = int(float(qso["frequency"]) * 1000)
-            date = qso["datetime"][:10].replace("-", "")
+            date = qso["datetime"][:10]  # Keep hyphens, e.g., "2025-03-15"
             time_str = qso["datetime"][11:].replace(":", "")[:4]
-            f.write(f"QSO: {freq:5d} CW {date} {time_str} {my_station['callsign']:<13} {qso['rst_sent']} {qso['exchange_sent']}   {qso['callsign']:<13} {qso['rst_received']} {qso['exchange_received']}\n")
+            exchange_sent = f"{int(qso['exchange_sent']):03d}" if qso['exchange_sent'].isdigit() else qso['exchange_sent']
+            f.write(f"QSO: {freq:5d} CW {date} {time_str} {my_station['callsign']:<13} {qso['rst_sent']} {exchange_sent}   {qso['callsign']:<13} {qso['rst_received']} {qso['exchange_received']}\n")
         f.write("END-OF-LOG:\n")
     messagebox.showinfo("Success", f"Exported to {filename}")
 
@@ -443,7 +535,7 @@ def show_contest_setup():
     if not tune_state.get():
         dialog = tk.Toplevel(key_window)
         dialog.title("Contest Setup")
-        dialog.geometry("300x450")
+        dialog.geometry("300x500")
         dialog.transient(key_window)
         dialog.grab_set()
 
@@ -512,7 +604,7 @@ def show_function_key_window():
     settings = load_settings()
     
     key_window = tk.Tk()
-    key_window.title("ZS6WAR AEA MM-3 Morse Machine Contest Keyer - v.0.1")
+    key_window.title("ZS6WAR AEA MM-3 Morse Machine Contest Keyer - v.0.4")
     key_window.geometry(settings.get("main_window_geometry", "900x550+0+0"))
 
     try:
@@ -539,62 +631,12 @@ def show_function_key_window():
     log_window = show_qso_window()
     log_window.protocol("WM_DELETE_WINDOW", lambda: None)
     
-    def format_output(callsign, rst, received_exchange, mycall):
-        formatted_rst = "5NN" if use_5nn.get() and rst == "599" else rst
-        formatted_received_exchange = received_exchange
-        if shorten_zeros.get() and received_exchange.isdigit():
-            formatted_received_exchange = received_exchange.replace("0", "T")
-        formatted_exchange = str(serial_number) if contest_config["use_serial_exchange"] else contest_config["exchange"]
-        formatted_serial = str(serial_number)
-        return callsign, formatted_rst, formatted_received_exchange, mycall, formatted_exchange, formatted_serial
-
-    def send_to_serial(message):
-        global ser, serial_number, speed_var
-        if ser is None or not ser.is_open:
-            messagebox.showerror("Error", "Serial port not connected. Please restart and select a port.")
-            key_window.destroy()
-            show_port_selection()
-            return 0
-        
-        callsign, rst, received_exchange, mycall, exchange, serial = format_output(
-            callsign_var.get().strip(),
-            snt_var.get().strip(),
-            exchange_var.get().strip(),
-            my_station["callsign"]
-        )
-        formatted_message = message.format(
-            callsign=callsign,
-            rst=rst,
-            exchange=exchange,
-            mycall=mycall,
-            serial=serial
-        ).upper()  # Convert to uppercase before sending
-        try:
-            ser.write(formatted_message.encode('ascii') + b'\n')
-            time.sleep(0.1)
-            ser.reset_input_buffer()
-            wpm = int(speed_var.get())
-            duration = calculate_cw_duration(formatted_message, wpm)
-            return duration
-        except serial.SerialException as e:
-            messagebox.showerror("Error", f"Failed to send: {e}")
-            ser.close()
-            ser = None
-            key_window.destroy()
-            show_port_selection()
-            return 0
-        except ValueError as e:
-            messagebox.showerror("Error", f"Invalid WPM value: {speed_var.get()}")
-            return 0
-        except Exception as e:
-            messagebox.showerror("Error", f"Unexpected error: {e}")
-            return 0
-
     def send_keyer_text(event):
         char = event.char
         if char and ser and ser.is_open and not tune_state.get():
             try:
-                ser.write(char.upper().encode('ascii'))  # Convert to uppercase before sending
+                ser.write(char.upper().encode('ascii'))
+                stop_repeat()
             except Exception:
                 pass
 
@@ -602,7 +644,7 @@ def show_function_key_window():
         global ser
         try:
             ser.write("\x03".encode('ascii') + b'\n')
-            ser.write(command.upper().encode('ascii') + b'\n')  # Convert to uppercase before sending
+            ser.write(command.upper().encode('ascii') + b'\n')
             if include_terminator:
                 terminator = "*9" if tune_command else "*C709"
                 ser.write(terminator.encode('ascii') + b'\n')
@@ -707,11 +749,6 @@ def show_function_key_window():
     def stop_repeat():
         nonlocal repeating
         repeating = False
-
-    def stop_repeat_and_untick(event=None):
-        nonlocal repeating
-        repeating = False
-        repeat_enabled.set(False)
 
     def create_action(f_key):
         def action():
@@ -832,16 +869,18 @@ def show_function_key_window():
             tk.Button(dialog, text="Save", command=save_changes).grid(row=len(station_items), column=0, columnspan=2, pady=10)
             tk.Button(dialog, text="Cancel", command=dialog.destroy).grid(row=len(station_items)+1, column=0, columnspan=2, pady=5)
 
-    def show_shorten_chars():
+    def show_exchange_settings():
         if not tune_state.get():
             settings_window = tk.Toplevel(key_window)
-            settings_window.title("Shorten Characters")
-            settings_window.geometry("300x150")
+            settings_window.title("Exchange Settings")
+            settings_window.geometry("300x200")
             tk.Label(settings_window, text="RST Format:").pack(pady=5)
             tk.Radiobutton(settings_window, text="599", variable=use_5nn, value=False).pack()
             tk.Radiobutton(settings_window, text="5NN", variable=use_5nn, value=True).pack()
             tk.Label(settings_window, text="Serial Numbers:").pack(pady=5)
             tk.Checkbutton(settings_window, text="Shorten 0 to T", variable=shorten_zeros).pack()
+            send_tu_var = tk.BooleanVar(value=contest_config["send_tu_on_log"])
+            tk.Checkbutton(settings_window, text="Send TU on Log", variable=send_tu_var, command=lambda: contest_config.update({"send_tu_on_log": send_tu_var.get()})).pack(pady=5)
             tk.Button(settings_window, text="Close", command=settings_window.destroy).pack(pady=10)
 
     def start_new_contest():
@@ -883,7 +922,7 @@ def show_function_key_window():
     contesting_menu.add_cascade(label="Macros", menu=macros_menu)
     for f_key in macros.keys():
         macros_menu.add_command(label=f"Edit {f_key}", command=lambda k=f_key: edit_macro_and_label(k))
-    contesting_menu.add_command(label="Shorten Chars", command=show_shorten_chars)
+    contesting_menu.add_command(label="Exchange Settings", command=show_exchange_settings)
 
     freq_frame = tk.Frame(key_window)
     freq_frame.grid(row=0, column=0, columnspan=4, pady=5, sticky="w")
@@ -929,7 +968,6 @@ def show_function_key_window():
         buttons[f_key] = btn
         ui_elements.append(btn)
         
-        # Add right-click context menu to each F-key button
         context_menu = tk.Menu(btn, tearoff=0)
         context_menu.add_command(label=f"Edit {f_key}", command=lambda k=f_key: edit_macro_and_label(k))
         btn.bind("<Button-3>", lambda event, menu=context_menu: menu.post(event.x_root, event.y_root))
@@ -991,7 +1029,7 @@ def show_function_key_window():
     key_window.bind('<Prior>', increase_speed)
     key_window.bind('<Next>', decrease_speed)
     key_window.bind('<Return>', log_qso)
-    key_window.bind('<Escape>', stop_repeat_and_untick)
+    key_window.bind('<Escape>', lambda event: stop_repeat())
 
     for col in range(8):
         key_window.grid_columnconfigure(col, weight=1, uniform="btn_group")
